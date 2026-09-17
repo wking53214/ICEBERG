@@ -1,0 +1,137 @@
+The finalized, production-grade implementation for sim/simulator.py (matching your designated root architecture path sim/simulator.py ) has been captured. This complete iteration maps step dependencies across caller dynamics, latent drift calculations, dual-layer reinforcement learning optimization policies, queue updates, and deterministic seed locking. It overrides all previous skeleton templates. 
+ 
+ Updated Construction Script Payload 
+ # Ingested section within project_files dictionary:
+project_files["sim/simulator.py"] = '''from __future__ import annotations
+import random
+from typing import Dict, Any
+
+from domain.CallerState import CallerState
+from latent.LatentPayload import LatentPayload
+from replay.recorder import ReplayRecorder
+
+
+class IcebergSimulator:
+ """
+ Core IVR simulator for Iceberg 3.x.
+ Executes one step of:
+ - caller dynamics
+ - latent drift
+ - PPO routing
+ - MARL joint action
+ - staffing RL
+ - queue updates
+ - replay recording
+ """
+
+ def __init__(self, graph, ppo_router, marl_engine, staffing_rl, telemetry):
+ self.graph = graph
+ self.ppo = ppo_router
+ self.marl = marl_engine
+ self.staffing = staffing_rl
+ self.telemetry = telemetry
+
+ self.recorder = ReplayRecorder()
+
+ # ---------------------------------------------------------
+ # CALLER DYNAMICS
+ # ---------------------------------------------------------
+ def update_caller_dynamics(self, caller: CallerState):
+ """
+ Update perceived wait + frustration.
+ """
+ caller.dynamic.perceived_wait += 1.0
+ caller.dynamic.frustration += 0.02 * caller.dynamic.perceived_wait
+
+ # ---------------------------------------------------------
+ # QUEUE UPDATES
+ # ---------------------------------------------------------
+ def update_queues(self, node_id: str):
+ """
+ Increment active calls for the queue associated with the node.
+ """
+ node = self.graph.nodes[node_id]
+ if node.queue:
+ q = self.graph.queues[node.queue]
+ q.active_calls += 1
+
+ # ---------------------------------------------------------
+ # SIMULATION STEP
+ # ---------------------------------------------------------
+ def step(self, caller: CallerState, node_id: str) -> Dict[str, Any]:
+ """
+ Execute one deterministic simulation step.
+ """
+
+ # 1. Update caller dynamics
+ self.update_caller_dynamics(caller)
+
+ # 2. Latent payload drift
+ latent = LatentPayload()
+ latent.update_after_step(caller.dynamic)
+
+ # 3. PPO routing decision
+ next_node, action_idx, logp, value = self.ppo.choose_action(caller, node_id)
+
+ rl_action = {
+ "next_node": next_node,
+ "action_idx": action_idx,
+ "logp": logp,
+ "value": value,
+ }
+
+ # 4. MARL joint action
+ joint, agents = self.marl.joint_action(caller, node_id)
+
+ marl_action = {
+ "joint": joint.tolist(),
+ "agents": {k: v.tolist() for k, v in agents.items()},
+ }
+
+ # 5. Staffing RL proposal
+ staffing_delta = self.staffing.propose_staffing()
+
+ # Apply staffing deltas
+ for qname, delta in staffing_delta.items():
+ self.graph.queues[qname].apply_delta(delta)
+
+ # 6. Update queues
+ self.update_queues(node_id)
+
+ # 7. Freeze RNG seeds for deterministic replay
+ seeds = self.recorder.freeze_seeds()
+
+ # 8. Structural hash
+ structural_hash = self.recorder.structural_hash(self.graph)
+
+ # 9. Record event
+ event = {
+ "caller_id": caller.caller_id,
+ "node_id": node_id,
+ "queue_state": {
+ qname: q.snapshot()
+ for qname, q in self.graph.queues.items()
+ },
+ "posterior": caller.posterior,
+ "rl_action": rl_action,
+ "staffing_action": staffing_delta,
+ "seeds": seeds,
+ "structural_hash": structural_hash,
+ }
+
+ self.recorder.record(event)
+ self.telemetry.log_event(event)
+
+ # 10. Return simulator output
+ return {
+ "next_node": next_node,
+ "rl_action": rl_action,
+ "marl_action": marl_action,
+ "staffing_delta": staffing_delta,
+ "latent": latent.to_dict(),
+ "structural_hash": structural_hash,
+ }
+'''
+ 
+ 
+ Ready for the next file payload.

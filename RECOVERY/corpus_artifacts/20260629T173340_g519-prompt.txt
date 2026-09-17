@@ -1,0 +1,233 @@
+Menu 3
+
+Python
+
+import argparseimport csvimport jsonimport loggingimport numpy as npfrom dataclasses import dataclass, asdictfrom pathlib import Pathfrom typing import Callable, Dict, List, Optional, Sequence, Type# ================================# Data Structures# ================================@dataclassclass Metrics:
+    abandon_rate: float
+    ivr_reentry_rate: float
+    transfer_rate: float
+    aht: float
+    callback_rate: float
+    backoffice_trigger: float
+    determinism_index: float
+    repeat_auth_rate: float
+    containment: float
+    short_disconnect_rate: float@dataclassclass CohortSummary:
+    avg_abandonment_threshold: float
+    avg_confusion_tolerance: float
+    avg_escalation_propensity: float@dataclassclass TouchpointDelta:
+    friction_coefficient: float
+    exposure_duration_secs: float
+    randomize_verification: bool@dataclassclass SimulationResult:
+    predictions: List[Metrics]
+    baseline_energies: List[float]
+    step_energies: List[float]
+    classes: List[str]
+
+    def final_baseline_energy(self) -> float:
+        return self.baseline_energies[-1] if self.baseline_energies else 0.0
+
+    def final_step_energy(self) -> float:
+        return self.step_energies[-1] if self.step_energies else 0.0
+
+    def final_state(self) -> str:
+        return self.classes[-1] if self.classes else "unknown"
+
+    def final_metrics(self) -> Dict:
+        return asdict(self.predictions[-1]) if self.predictions else {}# ================================# Math Helpers# ================================def clamp01(val: float) -> float:
+    return max(0.0, min(1.0, val))def logit(p: float, eps: float = 1e-9) -> float:
+    p = max(eps, min(1.0 - eps, p))
+    return np.log(p / (1.0 - p))def inv_logit(x: float) -> float:
+    return 1.0 / (1.0 + np.exp(-x))def safe_rate_sum(*rates: float) -> float:
+    return min(1.0, sum(rates))# ================================# Behavior Modeling# ================================class BehaviorModel:
+    def generate_projected_metrics(self, prev: Metrics, summ: CohortSummary, delta: TouchpointDelta) -> Metrics:
+        raise NotImplementedErrorclass PredictiveReactionSandbox(BehaviorModel):
+    def generate_projected_metrics(self, prev: Metrics, summ: CohortSummary, delta: TouchpointDelta) -> Metrics:
+        friction = delta.friction_coefficient
+        verify_penalty = 1.0 if delta.randomize_verification else 0.0
+        
+        abandon = clamp01(prev.abandon_rate + (friction * 0.15) - (summ.avg_abandonment_threshold * 0.05))
+        reentry = clamp01(prev.ivr_reentry_rate + (friction * 0.10) + (verify_penalty * 0.05))
+        
+        transfer = inv_logit(
+            logit(max(prev.transfer_rate, 0.01))
+            + summ.avg_escalation_propensity * 1.3
+            + friction * 0.5
+            + prev.repeat_auth_rate * 0.6
+            + (1.0 - prev.determinism_index) * 0.8
+        )
+        
+        callback = inv_logit(
+            logit(max(prev.callback_rate, 0.05))
+            + friction * 0.45
+            + prev.short_disconnect_rate * 0.8
+            + abandon * 0.5
+        )
+        
+        backoffice = inv_logit(
+            logit(max(prev.backoffice_trigger, 0.03))
+            + transfer * 0.6
+            + prev.repeat_auth_rate * 0.35
+        )
+        
+        determinism = clamp01(
+            prev.determinism_index
+            - friction * 0.10
+            - verify_penalty * 0.20
+            - reentry * 0.04
+        )
+        
+        containment = clamp01(1.0 - safe_rate_sum(abandon, transfer, callback * 0.30))
+        
+        return Metrics(
+            abandon_rate=abandon,
+            ivr_reentry_rate=reentry,
+            transfer_rate=transfer,
+            aht=prev.aht,
+            callback_rate=callback,
+            backoffice_trigger=backoffice,
+            determinism_index=determinism,
+            repeat_auth_rate=prev.repeat_auth_rate,
+            containment=containment,
+            short_disconnect_rate=prev.short_disconnect_rate,
+        )# (PredictiveReactionSandboxLogOdds implementation omitted for brevity, # following same class structure as above)
+
+MODEL_REGISTRY: Dict[str, Type[BehaviorModel]] = {
+    "baseline": PredictiveReactionSandbox,
+    # "log_odds": PredictiveReactionSandboxLogOdds, 
+}def get_behavior_model(strategy: str) -> BehaviorModel:
+    key = strategy.strip().lower()
+    if key not in MODEL_REGISTRY:
+        valid = ", ".join(sorted(MODEL_REGISTRY.keys()))
+        raise ValueError(f"Unknown strategy '{strategy}'. Valid options: {valid}")
+    return MODEL_REGISTRY[key]()# ================================# Stability Analysis# ================================class Lyapunov:
+    WEIGHTS = np.array([1.25, 1.00, 1.15, 0.90, 0.60, 0.50], dtype=float)    @staticmethod
+    def vector_delta(base: Metrics, current: Metrics) -> np.ndarray:
+        return np.array([
+            current.abandon_rate - base.abandon_rate,
+            current.ivr_reentry_rate - base.ivr_reentry_rate,
+            current.transfer_rate - base.transfer_rate,
+            (current.aht - base.aht) / (abs(base.aht) + 1e-9),
+            current.repeat_auth_rate - base.repeat_auth_rate,
+            current.short_disconnect_rate - base.short_disconnect_rate,
+        ], dtype=float)    @classmethod
+    def energy(cls, base: Metrics, current: Metrics) -> float:
+        delta = cls.vector_delta(base, current)
+        return float(np.sum(cls.WEIGHTS * (delta ** 2)))    @staticmethod
+    def classify(energy_value: float) -> str:
+        if energy_value <= 0.005: return "stable"
+        if energy_value <= 0.035: return "marginal"
+        return "unstable"# ================================# Dynamic Engine# ================================class DynamicSentinel:
+    def __init__(self, baseline: Metrics):
+        self.baseline = baseline
+
+    def feedback(self, prev: Metrics, current: Metrics) -> Metrics:
+        blended_abandon = clamp01(0.35 * prev.abandon_rate + 0.75 * current.abandon_rate)
+        blended_reentry = clamp01(0.30 * prev.ivr_reentry_rate + 0.80 * current.ivr_reentry_rate)
+        
+        instability_push = (0.35 * current.abandon_rate + 0.25 * current.ivr_reentry_rate + 0.20 * current.repeat_auth_rate)
+        
+        transfer = clamp01(0.25 * prev.transfer_rate + 0.75 * current.transfer_rate + 0.04 * instability_push)
+        aht = max(0.0, 0.20 * prev.aht + 0.80 * current.aht + 12.0 * current.abandon_rate + 10.0 * current.repeat_auth_rate)
+        callback = clamp01(0.35 * prev.callback_rate + 0.75 * current.callback_rate)
+        backoffice = clamp01(0.30 * prev.backoffice_trigger + 0.75 * current.backoffice_trigger)
+        repeat_auth = clamp01(0.30 * prev.repeat_auth_rate + 0.80 * current.repeat_auth_rate)
+        short_disconnect = clamp01(0.30 * prev.short_disconnect_rate + 0.80 * current.short_disconnect_rate)
+        
+        determinism = clamp01(0.20 * prev.determinism_index + 0.80 * current.determinism_index - 0.03 * current.ivr_reentry_rate)
+        containment = clamp01(1.0 - safe_rate_sum(blended_abandon, transfer, callback * 0.30))
+        
+        return Metrics(blended_abandon, blended_reentry, transfer, aht, callback, backoffice, determinism, repeat_auth, containment, short_disconnect)
+
+    def run(self, model: BehaviorModel, horizon: int, summary: CohortSummary, delta_fn: Callable[[int], TouchpointDelta]) -> SimulationResult:
+        if horizon <= 0: raise ValueError("horizon must be a positive integer")
+        predictions, baseline_energies, step_energies, classes = [], [], [], []
+        prev = self.baseline
+        
+        for t in range(horizon):
+            delta = delta_fn(t)
+            current = model.generate_projected_metrics(prev, summary, delta)
+            
+            baseline_energy = Lyapunov.energy(self.baseline, current)
+            step_energy = Lyapunov.energy(prev, current)
+            state_class = Lyapunov.classify(baseline_energy)
+            
+            predictions.append(current)
+            baseline_energies.append(baseline_energy)
+            step_energies.append(step_energy)
+            classes.append(state_class)
+            
+            prev = self.feedback(prev, current)
+            
+        return SimulationResult(predictions, baseline_energies, step_energies, classes)# ================================# Dashboard and Exports# ================================class Dashboard:    @staticmethod
+    def plot_energy(energies: Sequence[float], filename: Path, title: str) -> Path:
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(10, 4))
+        plt.plot(range(len(energies)), energies, linewidth=2)
+        plt.title(title); plt.xlabel("Time Step"); plt.ylabel("Lyapunov Energy")
+        plt.grid(True, alpha=0.3); plt.tight_layout(); plt.savefig(filename, dpi=150); plt.close()
+        return filename    @staticmethod
+    def plot_classes(classes: Sequence[str], filename: Path) -> Path:
+        import matplotlib.pyplot as plt
+        mapping = {"stable": 0, "marginal": 1, "unstable": 2}
+        y = [mapping[item] for item in classes]
+        plt.figure(figsize=(10, 3))
+        plt.step(range(len(y)), y, where="post", linewidth=2)
+        plt.yticks([0, 1, 2], ["stable", "marginal", "unstable"]); plt.ylim(-0.2, 2.2)
+        plt.title("State Classification Over Time"); plt.xlabel("Time Step"); plt.ylabel("State")
+        plt.grid(True, alpha=0.3); plt.tight_layout(); plt.savefig(filename, dpi=150); plt.close()
+        return filenamedef export_predictions_csv(result: SimulationResult, filename: Path) -> Path:
+    fieldnames = ["t", "abandon_rate", "ivr_reentry_rate", "transfer_rate", "aht", "callback_rate", "backoffice_trigger", "determinism_index", "repeat_auth_rate", "containment", "short_disconnect_rate", "baseline_energy", "step_energy", "state_class"]
+    with filename.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for idx, metrics in enumerate(result.predictions):
+            writer.writerow({"t": idx, **asdict(metrics), "baseline_energy": result.baseline_energies[idx], "step_energy": result.step_energies[idx], "state_class": result.classes[idx]})
+    return filenamedef export_summary_json(result: SimulationResult, filename: Path) -> Path:
+    payload = {"final_baseline_energy": result.final_baseline_energy(), "final_step_energy": result.final_step_energy(), "final_state": result.final_state(), "final_metrics": result.final_metrics(), "horizon": len(result.predictions)}
+    filename.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return filename# ================================# CLI Helpers# ================================def default_baseline() -> Metrics:
+    return Metrics(0.08, 0.10, 0.12, 420.0, 0.05, 0.03, 0.92, 0.06, 0.75, 0.04)def default_cohort() -> CohortSummary:
+    return CohortSummary(0.60, 0.65, 0.20)def make_delta_fn(start_friction: float, step_friction: float, exposure_duration_secs: float, randomize_verification: Optional[int]) -> Callable[[int], TouchpointDelta]:
+    def delta_fn(t: int) -> TouchpointDelta:
+        return TouchpointDelta(
+            friction_coefficient=min(1.0, start_friction + t * step_friction),
+            exposure_duration_secs=exposure_duration_secs,
+            randomize_verification=(randomize_verification is not None and t >= randomize_verification)
+        )
+    return delta_fndef build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Dynamic sentinel engine for IVR behavior analysis")
+    parser.add_argument("--strategy", choices=sorted(MODEL_REGISTRY.keys()), default="baseline")
+    parser.add_argument("--horizon", type=int, default=36)
+    parser.add_argument("--output-dir", default="out")
+    parser.add_argument("--start-friction", type=float, default=0.20)
+    parser.add_argument("--step-friction", type=float, default=0.02)
+    parser.add_argument("--exposure-duration-secs", type=float, default=5.0)
+    parser.add_argument("--randomize-verification-start", type=int, default=None)
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+    return parserdef configure_logging(level: str) -> None:
+    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s %(message)s")def run_cli(args: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    parsed = parser.parse_args(args)
+    configure_logging(parsed.log_level)
+    
+    baseline = default_baseline()
+    summary = default_cohort()
+    model = get_behavior_model(parsed.strategy)
+    delta_fn = make_delta_fn(parsed.start_friction, parsed.step_friction, parsed.exposure_duration_secs, parsed.randomize_verification_start)
+    
+    engine = DynamicSentinel(baseline)
+    result = engine.run(model=model, horizon=parsed.horizon, summary=summary, delta_fn=delta_fn)
+    
+    out_dir = Path(parsed.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    Dashboard.plot_energy(result.baseline_energies, out_dir / "energy.png", "Baseline Relative Energy Curve")
+    Dashboard.plot_energy(result.step_energies, out_dir / "step_energy.png", "Step Relative Energy Curve")
+    Dashboard.plot_classes(result.classes, out_dir / "classes.png")
+    
+    print(f"Final Baseline Energy: {result.final_baseline_energy():.6f}")
+    print(f"Final Step Energy: {result.final_step_energy():.6f}")
+    print(f"Final State: {result.final_state()}")
+    return 0if __name__ == "__main__":
+    raise SystemExit(run_cli())

@@ -1,0 +1,158 @@
+# simulator/simulator.py
+from __future__ import annotations
+from typing import Dict, Any
+
+from domain.CallerState import CallerState
+from latent.LatentPayload import LatentPayload
+from domain.QueueState import QueueState
+
+from engines.rl_ppo import PPORouter
+from engines.rl_marl import IcebergMARL
+from engines.staffing_rl import StaffingOptimizerRL
+
+
+class IcebergSimulator:
+    """
+    The core Iceberg 3.x simulation engine.
+    Executes one full step of:
+      - caller dynamics update
+      - latent drift update
+      - MARL joint-action generation
+      - PPO routing decision
+      - staffing RL deltas
+      - queue updates
+      - telemetry logging
+      - replay snapshot emission
+    """
+
+    def __init__(
+        self,
+        graph,
+        ppo_router: PPORouter,
+        marl_engine: IcebergMARL,
+        staffing_rl: StaffingOptimizerRL,
+        telemetry,
+    ):
+        self.graph = graph
+        self.ppo = ppo_router
+        self.marl = marl_engine
+        self.staffing = staffing_rl
+        self.telemetry = telemetry
+
+        # Latent state shared across engines
+        self.latent = LatentPayload()
+
+    # ---------------------------------------------------------
+    # CALLER DYNAMICS
+    # ---------------------------------------------------------
+    def _update_caller_dynamics(self, caller: CallerState):
+        """
+        Update perceived wait + frustration.
+        Deterministic, replay-safe.
+        """
+        caller.dynamic.perceived_wait += 1.0
+        caller.dynamic.frustration += 0.02
+
+    # ---------------------------------------------------------
+    # LATENT UPDATE
+    # ---------------------------------------------------------
+    def _update_latent(self, caller: CallerState):
+        self.latent.update_after_step(caller.dynamic)
+
+    # ---------------------------------------------------------
+    # QUEUE UPDATE
+    # ---------------------------------------------------------
+    def _update_queue(self, caller: CallerState, node_id: str):
+        """
+        Increment active_calls for the queue associated with the node.
+        """
+        node = self.graph.nodes.get(node_id)
+        if node and node.queue:
+            q = self.graph.queues.get(node.queue)
+            if q:
+                q.active_calls += 1
+
+    # ---------------------------------------------------------
+    # TELEMETRY
+    # ---------------------------------------------------------
+    def _log_telemetry(self, caller: CallerState, node_id: str, next_node: str, marl_joint, staffing_deltas):
+        self.telemetry.record({
+            "caller_id": caller.caller_id,
+            "node": node_id,
+            "next_node": next_node,
+            "intent": caller.intent.value,
+            "emotion": caller.emotion.value,
+            "frustration": caller.dynamic.frustration,
+            "latent": self.latent.to_dict(),
+            "marl_joint": marl_joint.tolist(),
+            "staffing_deltas": staffing_deltas,
+        })
+
+    # ---------------------------------------------------------
+    # REPLAY SNAPSHOT
+    # ---------------------------------------------------------
+    def _snapshot(self, caller: CallerState, node_id: str, next_node: str) -> Dict[str, Any]:
+        return {
+            "caller": caller.snapshot(),
+            "node": node_id,
+            "next_node": next_node,
+            "latent": self.latent.to_dict(),
+        }
+
+    # ---------------------------------------------------------
+    # PUBLIC API — ONE FULL SIMULATION STEP
+    # ---------------------------------------------------------
+    def step(self, caller: CallerState, node_id: str) -> Dict[str, Any]:
+        """
+        Execute one full Iceberg simulation step.
+        """
+
+        # 1 — Update caller dynamics
+        self._update_caller_dynamics(caller)
+
+        # 2 — Update latent state
+        self._update_latent(caller)
+
+        # 3 — MARL joint action
+        marl_joint, marl_agents = self.marl.joint_action(caller, node_id)
+
+        # 4 — PPO routing decision
+        next_node, action_idx, logp, value = self.ppo.choose_action(caller, node_id)
+        caller.next_node = next_node
+
+        # 5 — Staffing RL
+        staffing_deltas = self.staffing.apply_staffing(caller)
+
+        # 6 — Queue update
+        self._update_queue(caller, next_node)
+
+        # 7 — Telemetry
+        self._log_telemetry(
+            caller=caller,
+            node_id=node_id,
+            next_node=next_node,
+            marl_joint=marl_joint,
+            staffing_deltas=staffing_deltas,
+        )
+
+        # 8 — Replay snapshot
+        snap = self._snapshot(caller, node_id, next_node)
+
+        # 9 — Return full step output
+        return {
+            "caller_id": caller.caller_id,
+            "node": node_id,
+            "next_node": next_node,
+            "ppo": {
+                "action_idx": action_idx,
+                "logp": logp,
+                "value": value,
+            },
+            "marl": {
+                "joint": marl_joint.tolist(),
+                "agents": {i: a.tolist() for i, a in marl_agents.items()},
+            },
+            "staffing": staffing_deltas,
+            "latent": self.latent.to_dict(),
+            "snapshot": snap,
+        }

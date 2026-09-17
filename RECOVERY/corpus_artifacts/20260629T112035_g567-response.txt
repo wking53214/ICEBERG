@@ -1,0 +1,2 @@
+This simulation models iceberg melting and buoyancy dynamics. It calculates the vertical position of an iceberg based on Archimedes' principle, determining the submerged volume relative to the density difference between ice and seawater, and updates the submerged mass as the iceberg melts over time. 
+ The simulation is contained within the requested file. It utilizes physical constants to derive the buoyancy ratio and provides an update mechanism for mass reduction. Let me know if you would like to expand this with more complex thermodynamics or spatial movement.

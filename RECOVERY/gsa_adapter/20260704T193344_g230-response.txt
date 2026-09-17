@@ -1,0 +1,218 @@
+Context and Architecture Analysis 
+ To create a deterministic, interoperable system within the Governance–State Architecture (GSA), we must design a Universal Governance Adapter Pipeline (the wrapper). Combining gov4_kernel.py (which leverages a synchronous, reduction-based cryptographic ledger and Lyapunov stability analysis) with the GSA UNIVERSAL SYSTEM FOUNDATION v6.4 (which relies on asynchronous processing, coroutine-based execution locks, and frozen data envelopes) requires a translation layer. 
+ The universal wrapper operates like a Star Trek Universal Translator: it abstracts the underlying execution semantics (synchronous telemetry loops vs. asynchronous state machine updates) into a unified, modular interface. Each wrapped component exposes an identical, composable footprint—allowing modules to be chained sequentially or in parallel like functional Lego bricks. 
+ [Incoming Data Stream]
+ │
+ ▼
+ ┌───────────────┐
+ │ GsaAdapter │ ◄── Lego Block 1 Wrap (e.g., Engine Telemetry)
+ └───────┬───────┘
+ │ (Normalized Interface Exchange)
+ ▼
+ ┌───────────────┐
+ │ GsaAdapter │ ◄── Lego Block 2 Wrap (e.g., FSM Evaluation)
+ └───────┬───────┘
+ │
+ ▼
+[Unified State Matrix / Action Verdict]
+ 
+ 
+ Universal Interoperability Code Blueprint 
+ The solution below provides the GsaUniversalAdapter wrapper along with an orchestration engine ( GovernanceLegoPipeline ). It contains translation bridges that map data structures from gov4_kernel.py (e.g., TrafficPayload , StateSnapshot ) to v6.4 targets (e.g., Governance_Data_Envelope ) and vice versa, executing within an asynchronous runtime event loop. 
+ """
+gsa_universal_wrapper.py
+
+Universal Interoperability Wrapper for GSA Core Modules.
+Provides an abstract, bidirectional translation layer ("Universal Translator")
+to normalize execution boundaries between synchronous ledgers and asynchronous FSM engines.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+from dataclasses import replace
+from types import MappingProxyType
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Union
+
+# Import components from both architectures
+# Assumes modules are accessible via the local naming context
+from gov4_kernel import (
+ TrafficPayload, EngineCeilings, compute_entropy, 
+ compute_lyapunov, EventStore, Provenance
+)
+from universal_foundation import (
+ Governance_Data_Envelope, Governance_State_Enum, 
+ deep_freeze_structure_function
+)
+
+# ============================================================
+# PROTOCOLS & CORE COMPLIANCE INTERFACES
+# ============================================================
+
+class ComposableLegoModule(Protocol):
+ """Defines the unified footprint required for all system components."""
+ async def process_payload(self, context_envelope: Governance_Data_Envelope) -> Governance_Data_Envelope:
+ ...
+
+
+# ============================================================
+# UNIVERSAL ADAPTER (THE WRAPPER)
+# ============================================================
+
+class GsaUniversalAdapter:
+ """
+ Wraps legacy or disparate GSA modules into a uniform asynchronous execution pipeline.
+ Acts as a bidirectional translator for headers, payloads, and state context.
+ """
+ def __init__(
+ self, 
+ underlying_module: Any, 
+ translation_bridge: Callable[[Any, Governance_Data_Envelope], Any]
+ ) -> None:
+ self.module = underlying_module
+ self.bridge = translation_bridge
+
+ async def process_payload(self, context_envelope: Governance_Data_Envelope) -> Governance_Data_Envelope:
+ """Executes the wrapped module logic using the normalized engine standard."""
+ try:
+ # Check if target module natively implements async execution interface
+ if hasattr(self.module, "execute_governance_logic"):
+ return await self.module.execute_governance_logic(context_envelope)
+ elif hasattr(self.module, "execute_governance_module"):
+ return await self.module.execute_governance_module(context_envelope)
+ 
+ # Execute synchronous components within the adapter bridge context
+ loop = asyncio.get_event_loop()
+ result_envelope = await loop.run_in_executor(
+ None, 
+ self.bridge, 
+ self.module, 
+ context_envelope
+ )
+ return result_envelope
+ 
+ except Exception as err:
+ return replace(
+ context_envelope, 
+ status_string=f"GSA_ADAPTER_EXC: {type(err).__name__}"
+ )
+
+
+# ============================================================
+# TRANSLATION BRIDGES (LEGO ADAPTER IMPLEMENTATIONS)
+# ============================================================
+
+def bridge_gov4_chassis_to_v6(
+ chassis_instance: Any, 
+ envelope: Governance_Data_Envelope
+) -> Governance_Data_Envelope:
+ """
+ Translates v6.4 Data Envelopes into v4.0 TrafficPayloads, updates the Welford
+ stochastic tracking array, and updates the envelope with Lyapunov indicators.
+ """
+ payload_dict = envelope.payload_data
+ 
+ # Extract telemetry factors from incoming context
+ traffic_data = TrafficPayload(
+ latency=float(payload_dict.get("latency", 0.0)),
+ abort_rate=float(payload_dict.get("abort_rate", 0.0)),
+ reentry_rate=float(payload_dict.get("reentry_rate", 0.0)),
+ load_depth=float(payload_dict.get("load_depth", 0.0)),
+ determinism_index=float(payload_dict.get("determinism_index", 1.0))
+ )
+ 
+ # Process analytics via synchronous governance chassis step
+ analysis_out = chassis_instance.step(traffic_data)
+ 
+ # Map analytical outcomes directly to v6 state vectors
+ updated_session = dict(envelope.session_state_mapping)
+ updated_session["lyapunov_energy"] = analysis_out["energy"]
+ updated_session["stochastic_entropy"] = analysis_out["entropy"]
+ updated_session["v4_regime_classification"] = analysis_out["regime"]
+ 
+ return replace(
+ envelope,
+ anomaly_score_float=float(analysis_out["energy"]),
+ status_string=f"GSA_V4_PROCESSED_{analysis_out['regime']}",
+ session_state_mapping=deep_freeze_structure_function(updated_session)
+ )
+
+
+def bridge_v6_processor_to_v6(
+ processor_instance: Any, 
+ envelope: Governance_Data_Envelope
+) -> Governance_Data_Envelope:
+ """
+ Pass-through bridge for native asynchronous v6.4 modules.
+ Ensures structural validation before direct execution.
+ """
+ # Native v6 modules operate directly on the envelope structure
+ return asyncio.run(processor_instance.execute_governance_logic(envelope))
+
+
+# ============================================================
+# ORCHESTRATION PIPELINE ENGINE
+# ============================================================
+
+class GovernanceLegoPipeline:
+ """Manages sequential execution across chains of Universal Adapters."""
+ def __init__(self) -> None:
+ self._pipeline_stages: List[ComposableLegoModule] = []
+
+ def attach_stage(self, adapter: ComposableLegoModule) -> GovernanceLegoPipeline:
+ """Appends a new wrapped Lego module stage to the execution chain."""
+ self._pipeline_stages.append(adapter)
+ return self
+
+ async def execute(self, initial_envelope: Governance_Data_Envelope) -> Governance_Data_Envelope:
+ """Pipes the data envelope sequentially through all registered modules."""
+ current_envelope = initial_envelope
+ for stage in self._pipeline_stages:
+ current_envelope = await stage.process_payload(current_envelope)
+ # Short-circuit execution if critical operational thresholds break down
+ if "CRITICAL" in current_envelope.status_string or "HALT" in current_envelope.status_string:
+ break
+ return current_envelope
+ 
+ 
+ Inter-Module Operational Architecture 
+ The execution parameters below demonstrate how the two modules communicate across the universal wrapper boundary. This topology streams real-time mathematical matrix updates directly into the Finite State Machine (FSM). 
+ # Verification template mapping the analytical step to the state machine step
+async def verification_runtime_example():
+ from gov4_kernel import GovernanceChassis
+ from universal_foundation import Governance_Logic_Processor, Governance_Data_Envelope
+ 
+ # Initialize Core Module 1 (v4 Stochastic Core)
+ v4_chassis = GovernanceChassis()
+ 
+ # Initialize Core Module 2 (v6 State machine Processor)
+ # Using a dummy SHA256 string for example confirmation
+ v6_token_hash = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+ v6_processor = GovernanceLogicProcessor(context_store_instance=None, admin_token_sha_string=v6_token_hash)
+ 
+ # Wrap both modules with the Universal Adapter ("Lego Blocks")
+ stage_one = GsaUniversalAdapter(v4_chassis, bridge_gov4_chassis_to_v6)
+ stage_two = GsaUniversalAdapter(v6_processor, bridge_v6_processor_to_v6)
+ 
+ # Assemble the Interoperable Pipeline
+ pipeline = GovernanceLegoPipeline()
+ pipeline.attach_stage(stage_one).attach_stage(stage_two)
+ 
+ # Fabricate entry data payload containing telemetry metrics
+ input_metrics = {
+ "latency": 450.0,
+ "abort_rate": 0.88,
+ "reentry_rate": 8.5,
+ "load_depth": 4200.0,
+ "determinism_index": 0.92
+ }
+ 
+ envelope = Governance_Data_Envelope.create_envelope(
+ header_dict={"source": "telemetry_node_alpha"},
+ payload_data=input_metrics
+ )
+ 
+ # Execute aggregate pipeline processes across the architectural bounds
+ final_output = await pipeline.execute(envelope)
+ return final_output
