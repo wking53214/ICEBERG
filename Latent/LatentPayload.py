@@ -112,10 +112,32 @@ class LatentPayload:
         return {k: v for k, v in d.items() if not k.startswith("_")}  # keep tunables out of the hash surface
 
     def load_from_dict(self, data: Dict[str, Any]):
-        """Dynamically update attributes based on incoming dictionary."""
-        for field in fields(self):
-            if field.name in data:
-                setattr(self, field.name, self._clamp(data[field.name]))
+        """
+        Dynamically update attributes based on incoming dictionary.
+
+        Fixed 2026-07-01: previously ran self._clamp(value) -- a [0.0,1.0]
+        float clamp -- on EVERY field regardless of type. Verified corruption:
+        friction_count=5 silently became 1.0 (wrong type AND wrong value,
+        clamped into a range meant for emotional scalars); step_index=42
+        became 1.0 the same way; trust_baseline=None crashed outright
+        (TypeError comparing None to a float). This method is unused
+        elsewhere in the current codebase, but it's exactly what a future
+        replay/deserialization path would reach for given its own docstring
+        -- fixing now rather than leaving it as a landmine.
+        """
+        for f in fields(self):
+            if f.name not in data or f.name.startswith("_"):
+                continue
+            value = data[f.name]
+            if f.name == "trust_baseline":
+                setattr(self, f.name, None if value is None else self._clamp(float(value)))
+            elif f.name == "friction_count":
+                setattr(self, f.name, max(0, min(int(value), self._FRICTION_CAP)))
+            elif f.name == "step_index":
+                setattr(self, f.name, max(0, int(value)))
+            else:
+                # every remaining declared field is a bounded [0,1] float
+                setattr(self, f.name, self._clamp(float(value)))
 
     def structural_hash(self) -> str:
         """

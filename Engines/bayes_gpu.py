@@ -23,6 +23,15 @@ class BayesianIntentEngineGPU:
         if deterministic:
             torch.use_deterministic_algorithms(True)
         
+    # Fixed 2026-07-01: unclamped log(0) = -inf, and -inf - (-inf) inside
+    # softmax's max-subtraction step produces NaN, not just "small
+    # probabilities." Verified against this exact case (posterior={A:0,B:1},
+    # likelihood={A:1,B:0}): output was {"A": nan, "B": nan}. That silently
+    # breaks determinism (NaN != NaN, so out1 == out2 is False even for
+    # identical inputs) and passes json.dumps without error, letting a
+    # corrupted result flow into a structural hash looking like valid JSON.
+    _EPS = 1e-12
+
     def _to_tensor(self, data: Dict[str, float], intents: List[str]) -> torch.Tensor:
         """Converts dict to tensor in deterministic order."""
         return torch.tensor([data[i] for i in intents], dtype=torch.float32, device=self.device)
@@ -33,18 +42,18 @@ class BayesianIntentEngineGPU:
 
     def observe_single(self, posterior: Dict[str, float], likelihoods: Dict[str, float], intents: List[str]) -> Dict[str, float]:
         """Performs Bayesian update in log-space."""
-        p = self._to_tensor(posterior, intents).log()
-        l = self._to_tensor(likelihoods, intents).log()
+        p = self._to_tensor(posterior, intents).clamp_min(self._EPS).log()
+        l = self._to_tensor(likelihoods, intents).clamp_min(self._EPS).log()
         
         # Log-space: multiplication becomes addition
         return {i: float(v) for i, v in zip(intents, self._normalize_log(p + l).tolist())}
 
     def observe_sequence(self, posterior: Dict[str, float], sequence_likelihoods: List[Dict[str, float]], intents: List[str]) -> Dict[str, float]:
         """Performs sequential updates in log-space."""
-        p = self._to_tensor(posterior, intents).log()
+        p = self._to_tensor(posterior, intents).clamp_min(self._EPS).log()
         
         for lk in sequence_likelihoods:
-            l = self._to_tensor(lk, intents).log()
+            l = self._to_tensor(lk, intents).clamp_min(self._EPS).log()
             p = p + l
             
         return {i: float(v) for i, v in zip(intents, self._normalize_log(p).tolist())}
